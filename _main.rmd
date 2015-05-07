@@ -1,0 +1,335 @@
+---
+title: "Public Pension Plan Prototypes"
+author: "Don Boyd"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+---
+
+```{r runall, eval=FALSE, echo=FALSE}
+# When we want a final report, run the following code selectively "by hand" (interactively) -- NEVER using Knit with eval=TRUE
+
+rmdfn <- "./_Main.rmd" # this file
+outfn <- paste0("./Results/", "PPPPrototypes_", format(Sys.time(), "%Y-%m-%d"), ".html")
+rmarkdown::render(rmdfn, output_format="html_document", output_file=outfn)
+
+# Note that it is safest to fully exit RStudio and restart it before running the whole thing. Otherwise knitr can get confused
+# and include repetitive information in the output html file.
+
+```
+
+
+```{r mainSet options, echo=FALSE, cache=FALSE}
+options(width=120)
+knitr::opts_chunk$set(fig.width=14, fig.height=10, echo=FALSE)
+# Note: when saving maps (ggsave), width=16, height=9 seems to get rid of white space
+
+```
+
+
+```{r libs, message=FALSE}
+library(dplyr)
+options(dplyr.print_min = 60) # default is 10
+options(dplyr.print_max = 60) # default is 20
+
+library(knitr)
+library(lubridate)
+library(ggplot2)
+library(magrittr)
+library(readr)
+library(readxl)
+library(stringr)
+library(tidyr)
+
+# load my packages last
+# devtools::install_github("donboyd5/btools")
+# devtools::install_github("donboyd5/pdata")
+library(btools)
+library(pdata) # pension data
+
+# CRR locations for CAFRs and AVs
+# http://publicplansdata.org/reports/  for all
+# http://publicplansdata.org/resources/download-avs-cafrs/  menu system
+
+
+```
+
+
+```{r defines}
+resultsdir <- "./Results/"
+
+```
+
+
+```{r makevars}
+# create a df from the ppd, with constructed vars needed for prototype analysis
+
+# start by setting up tools to find needed variables, given how many are in the ppd
+ppdvars <- ppdvars # now we can look at it in the viewer
+# glimpse(ppd)
+# names(ppd)
+findvars <- function(text) {
+  # note that there may be some discrepancies between variables found in the "variables" file
+  # and those actually in the data
+  df <- ppdvars %>% filter(grepl(text, `Variable Label`, ignore.case=TRUE) | 
+                             grepl(text, `Variable Name`, ignore.case=TRUE)) %>% 
+    select(`Variable Label`, `Variable Name`)
+  return(df)
+}
+# grep("salar", names(ppd), ignore.case=TRUE, value=TRUE) # search for variable names with desired text - use actual data file
+# temp <- findvars("salar") # now use viewer to look at temp
+
+# summary(filter(select(ppd, fy, ActFundedRatio_GASB), fy==2013)) # look for NAs by year
+
+# variable choices when there are multiple options (results from analysis that isn't always shown below)
+# assets: many NA for MktAssets_ActRpt; MktAssets_net looks better
+# age variables: there are many: ActiveAge_avg, BeneficiaryAge_avg, ServiceRetireeAge_avg, ServiceRetAge_avg
+#   but ALL have many missing values
+#   ActiveAge_avg has fewest missing values - 110 not NA's in the median of 2009-2013; others are much worse
+# so, do not use age in the analysis, but do look at it by cluster after plans are clustered
+
+# another way to get at this may be through pvfb
+# PVFB_active, PVFB_retiree
+# explore:
+# ppd %>% select(fy, ppd_id, contains("PVFB")) %>%
+#   gather(variable, value, -fy, -ppd_id) %>%
+#   group_by(variable, fy) %>% 
+#   mutate(value=cton(value)) %>% 
+#   do(qtiledf(.$value)) %>%
+#   data.frame
+# almost all values are missing; a few exceptions:
+#  - we have 119 non-missing PVFB-active in 2012; not really as many as I would like
+#  - PVFB-retiree is pretty good in most years, including 140 nonmissing in 2012
+# so best we could do is retire/active ratio for maybe 119 plans
+# ppd %>% mutate(rapvfb=PVFB_retiree/PVFB_active) %>%
+#   group_by(fy) %>%
+#   do(qtiledf(.$rapvfb))
+# some big differences but probably not usable in clustering
+
+# Classifiers:
+# PlanType 1-PERS or SERS, 2- TRS, 3- Police/Fire/Safety
+# AdministeringGovt  0-State, 1-County, 2-City, 5- School
+ptlevs <- c(1, 2, 3); ptlabs <- c("General emp", "Teachers", "Safety")
+adlevs <- c(0, 1, 2, 5); adlabs <- c("State", "County", "City", "School")
+
+
+# get the desired data and calc vars
+df <- ppd %>% select(ppd_id, PlanName, fy, ActFundedRatio_GASB, InvestmentReturnAssumption_GASB, PercentReqContPaid,
+                     NormCostRate_tot, actives_tot, MktAssets_net,
+                     contrib_tot, benefits_tot, expense_net, actives_tot, beneficiaries_ServiceRetirees,
+                     ActiveAge_avg, ActiveSalary_avg) %>%
+  group_by(ppd_id, PlanName) %>%
+  mutate(activepch=actives_tot / actives_tot[match(fy, fy-1)] * 100 - 100, 
+         xcfpct=(contrib_tot - benefits_tot) / MktAssets_net * 100,
+         xcfpct2=(contrib_tot + expense_net) / MktAssets_net * 100, # see missing value analysis below for reasoning here
+         abratio=actives_tot / beneficiaries_ServiceRetirees) %>%
+  filter(fy>=2009, fy<=2013) %>% # there is some 2014 data in the file, but it is not ready yet
+  summarise_each(funs(median(., na.rm=TRUE)), ActFundedRatio_GASB, InvestmentReturnAssumption_GASB,
+                 PercentReqContPaid, NormCostRate_tot, activepch, xcfpct, xcfpct2, abratio,
+                 ActiveAge_avg, ActiveSalary_avg)
+
+```
+
+# Investigate the data
+
+## Simple distributions and correlations for plan-specific medians computed over the period 2009-2013
+```{r simple}
+# get distributions and # NAs
+df %>% select(-PlanName) %>%
+  gather(variable, value, -ppd_id) %>% 
+  group_by(variable) %>%
+  do(qtiledf(.$value)) %>%
+  kable(digits=4, caption="Quantiles")
+# good, xcfpct2 looks good
+# active salary also has enough obs
+
+# look at correlations among vars
+cor(select(ungroup(df), -ppd_id, -PlanName), use="pairwise.complete.obs") %>% 
+  kable(caption="Correlations, pairwise.complete.obs", digits=4)
+
+```
+
+
+
+
+## Missing values check
+```{r mv, eval=FALSE}
+# don't normally include this in the output
+# which plans have missing data in vars we care about?
+df %>% filter(is.na(NormCostRate_tot) | is.na(xcfpct)) %>% 
+  select(ppd_id, PlanName, NormCostRate_tot, xcfpct) %>% # keep only selected vars so we have room to see results
+  kable(digits=4) 
+# normcost loses NYCFire, NYCPolice
+# xcfpct loses 25, including CalSTRS, Ohio, Chicago Municipal, and Boston - that's too much to lose
+
+
+# could we use expense_net instead of benefits_tot?
+ppd %>% select(ppd_id, PlanName, fy, benefits_tot, expense_net) %>%
+  group_by(fy) %>%
+  summarise_each(funs(n(), nna=sum(is.na(.)), median(., na.rm=TRUE)), benefits_tot, expense_net)
+# far fewer missing for expense than benefits; sign is negative
+
+# how correlated are they?
+cor(ppd[, c("benefits_tot", "expense_net")], use="complete.obs") # only .085
+f <- function(v1, v2) {
+  d <- cor(cbind(v1, v2), use="complete.obs")
+  return(d[1, 2])
+}
+ppd %>% select(ppd_id, PlanName, fy, benefits_tot, expense_net) %>%
+  group_by(fy) %>%
+  summarise(cor=f(benefits_tot, expense_net)) # hmmm, correlation is .99 in most years except 2008
+# look at 2008 - some digits appear way off eg Missouri local
+tmp <- ppd %>% select(ppd_id, PlanName, fy, benefits_tot, expense_net) %>%
+  filter(fy==2008) %>%
+  mutate(ratio=benefits_tot / abs(expense_net)) %>%
+  arrange(desc(ratio))
+# MO Local appears to be the main problem in 2008; I've notified CRR and they say they have fixed it
+
+ppd %>% filter(ppd_id==61) %>% 
+  select(ppd_id, PlanName, fy, benefits_tot, expense_net) %>%
+  mutate(ratio=benefits_tot / abs(expense_net)) %>%
+  arrange(fy)
+
+```
+
+
+# Cluster analysis
+```{r cluster}
+
+df2 <- df %>% select(ppd_id, PlanName, ActFundedRatio_GASB, InvestmentReturnAssumption_GASB, PercentReqContPaid,
+                     NormCostRate_tot, activepch, xcfpct2, abratio, ActiveSalary_avg) 
+
+df.prescale <- na.omit(df2) # listwise deletion of missing (NYCPolice, NYCFire)
+df.scaled <- df.prescale
+df.scaled[, -c(1, 2)] <- scale(df.scaled[, -c(1, 2)]) # scale to mean=0, sd=1 before doing distance calculations
+# verify mean sd
+# df.scaled %>% gather(variable, value, -ppd_id, -PlanName) %>%
+#   group_by(variable) %>%
+#   summarise(mean = mean(value), sd = sd(value))
+d <- dist(df.scaled[, -c(1:2)])   # calc Euclidean distance matrix 
+hc <- hclust(d) # hierarchical cluster
+plot(hc, labels=as.character(df.scaled$ppd_id)) # plot the dendrogram
+print(hc)
+
+# which plans in each cluster are closest to the center of their cluster? These plans might be used as a model for that kind of plan
+
+
+```
+
+
+## Summary of clusters
+```{r}
+# create a specific number of clusters and look at their characteristics
+group <- cutree(hc, k=8) # assign each plan to a group
+# put group id on the cluster variables df, and bring in other data
+df.clust <- cbind(group, df.prescale) %>% 
+  left_join(ppd %>% filter(fy==2013) %>% select(ppd_id, MktAssets_net, PlanType, AdministeringGovt)) %>%
+  mutate(planf=factor(PlanType, levels=ptlevs, labels=ptlabs),
+         adminf=factor(AdministeringGovt, levels=adlevs, labels=adlabs)) %>%
+  select(-PlanType, -AdministeringGovt) %>%
+  select(ppd_id, PlanName, planf, adminf, everything()) %>%
+  arrange(group, desc(MktAssets_net))
+
+count(df.clust, group) %>% arrange(desc(n))
+clusterinfo <- df.clust %>% group_by(group) %>% 
+  summarise_each(funs(median(., na.rm=TRUE)), -c(ppd_id, PlanName, planf, adminf))
+# ActFundedRatio_GASB, PercentReqContPaid, NormCostRate_tot, activepch, xcfpct2, abratio, ActiveSalary_avg
+cnt <- count(df.clust, group)
+left_join(cnt, clusterinfo) %>% arrange(desc(n)) %>% 
+  mutate(MktAssets_net=MktAssets_net/1e6) %>%
+  kable(caption="Medians for each cluster", digits=3)
+
+df.clust %>% group_by(group, planf) %>%
+  summarise(n=n()) %>%
+  mutate(planf=ifelse(is.na(planf), "Missing", as.character(planf))) %>%
+  spread(planf, n, fill=0) %>%
+  kable(caption="# of plans in each cluster, by plan type")
+
+
+df.clust %>% group_by(group, adminf) %>%
+  summarise(n=n()) %>%
+  mutate(adminf=ifelse(is.na(adminf), "Missing", as.character(adminf))) %>%
+  spread(adminf, n, fill=0) %>%
+  kable(caption="# of plans in each cluster, by administration")
+
+
+```
+
+
+Comments:  
+
+* 1 and 2 seem pretty similar - fairly average, underfunded plans
+* 3 expensive relatively low outflow plans
+* 4 poorly funded high outflow mature plans with bad-behaving sponsors
+* 5 well funded low outflow high actives plans
+* 6 well funded low discount rate plans
+
+
+## Plans in each cluster, sorted by asset size
+```{r}
+f <- function(groupnum) {
+  df.clust %>% filter(group==groupnum) %>%
+    kable(digits=4)
+}
+# groupnum <- 1
+f(1)
+f(2)
+f(3)
+f(4)
+f(5)
+f(6)
+f(8)
+f(7)
+
+```
+
+
+## Plans in each cluster, ranked by distance from cluster center
+```{r}
+# stack the cluster summaries (clusterinfo) and the clustered plans df.clust
+cl2 <- clusterinfo %>% mutate(PlanName=paste0("Group ", group, " medians"), ppd_id=-group)
+
+df.all <- bind_rows(cl2, df.clust)
+
+getdist <- function(df, clustvars) {
+  df <- as.data.frame(df) # need old fashioned data frame to put rownames on it
+  rownames(df) <- df$ppd_id # I want rownames because it guarantees I can't mix up what the distances measure
+  scaled <- scale(df[, clustvars])
+  d <- as.matrix(dist(scaled), labels=TRUE)
+  distdf <- data_frame(ppd_id=as.numeric(names(d[, 1])), dist=d[, 1])
+  return(distdf)
+}
+
+cvars <- c("ActFundedRatio_GASB", "InvestmentReturnAssumption_GASB", "PercentReqContPaid", "NormCostRate_tot", "activepch",
+           "xcfpct2", "abratio", "ActiveSalary_avg")
+df.dist <- df.all %>% group_by(group) %>%
+  arrange(ppd_id) %>%
+  do(getdist(., cvars))
+
+# merge the distances back against the raw (unscaled) data and examine results
+df.all2 <- left_join(df.all, df.dist) %>% arrange(group, dist)
+
+f <- function(groupnum) {
+  df.all2 %>% filter(group==groupnum) %>%
+    mutate(MktAssets_net=MktAssets_net/1e6) %>%
+    select(-group) %>%
+    select(ppd_id, PlanName, dist, everything()) %>%
+    kable(digits=4, caption=paste0("Group: ", groupnum, ".  Assets $ billions"))
+}
+f(1)
+f(2)
+f(3)
+f(4)
+f(5)
+f(6)
+f(8)
+f(7)
+
+
+```
+
+
+
+
