@@ -44,8 +44,8 @@ library(stringr)
 library(tidyr)
 
 # load my packages last
-# devtools::install_github("donboyd5/btools")
-# devtools::install_github("donboyd5/pdata")
+#devtools::install_github("donboyd5/btools")
+#devtools::install_github("donboyd5/pdata")
 library(btools)
 library(pdata) # pension data
 
